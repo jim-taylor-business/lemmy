@@ -1,9 +1,19 @@
+use super::not_zero;
 use crate::site::{application_question_check, site_default_post_listing_type_check};
-use actix_web::web::{Data, Json};
+use activitypub_federation::config::Data;
+use actix_web::web::Json;
 use lemmy_api_common::{
   context::LemmyContext,
+  request::replace_image,
   site::{EditSite, SiteResponse},
-  utils::{is_admin, local_site_rate_limit_to_rate_limit_config},
+  utils::{
+    get_url_blocklist,
+    is_admin,
+    local_site_rate_limit_to_rate_limit_config,
+    local_site_to_slur_regex,
+    process_markdown_opt,
+    proxy_image_link_opt_api,
+  },
 };
 use lemmy_db_schema::{
   source::{
@@ -12,22 +22,24 @@ use lemmy_db_schema::{
     federation_blocklist::FederationBlockList,
     local_site::{LocalSite, LocalSiteUpdateForm},
     local_site_rate_limit::{LocalSiteRateLimit, LocalSiteRateLimitUpdateForm},
+    local_site_url_blocklist::LocalSiteUrlBlocklist,
     local_user::LocalUser,
     site::{Site, SiteUpdateForm},
     tagline::Tagline,
   },
   traits::Crud,
-  utils::{diesel_option_overwrite, diesel_option_overwrite_to_url, naive_now},
+  utils::{diesel_string_update, diesel_url_update, naive_now},
   RegistrationMode,
 };
 use lemmy_db_views::structs::{LocalUserView, SiteView};
 use lemmy_utils::{
-  error::{LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult},
+  error::{LemmyErrorExt, LemmyErrorType, LemmyResult},
   utils::{
     slurs::check_slurs_opt,
     validation::{
       build_and_check_regex,
       check_site_visibility_valid,
+      check_urls_are_valid,
       is_valid_body_field,
       site_description_length_check,
       site_name_length_check,
@@ -40,8 +52,10 @@ pub async fn update_site(
   data: Json<EditSite>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
-) -> Result<Json<SiteResponse>, LemmyError> {
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+) -> LemmyResult<Json<SiteResponse>> {
+  let site_view = SiteView::read_local(&mut context.pool())
+    .await?
+    .ok_or(LemmyErrorType::LocalSiteNotSetup)?;
   let local_site = site_view.local_site;
   let site = site_view.site;
 
@@ -54,12 +68,29 @@ pub async fn update_site(
     SiteLanguage::update(&mut context.pool(), discussion_languages.clone(), &site).await?;
   }
 
+  let slur_regex = local_site_to_slur_regex(&local_site);
+  let url_blocklist = get_url_blocklist(&context).await?;
+  let sidebar = diesel_string_update(
+    process_markdown_opt(&data.sidebar, &slur_regex, &url_blocklist, &context)
+      .await?
+      .as_deref(),
+  );
+
+  let icon = diesel_url_update(data.icon.as_deref())?;
+  replace_image(&icon, &site.icon, &context).await?;
+  let icon = proxy_image_link_opt_api(icon, &context).await?;
+
+  let banner = diesel_url_update(data.banner.as_deref())?;
+  replace_image(&banner, &site.banner, &context).await?;
+  let banner = proxy_image_link_opt_api(banner, &context).await?;
+
   let site_form = SiteUpdateForm {
     name: data.name.clone(),
-    sidebar: diesel_option_overwrite(data.sidebar.clone()),
-    description: diesel_option_overwrite(data.description.clone()),
-    icon: diesel_option_overwrite_to_url(&data.icon)?,
-    banner: diesel_option_overwrite_to_url(&data.banner)?,
+    sidebar,
+    description: diesel_string_update(data.description.as_deref()),
+    icon,
+    banner,
+    content_warning: diesel_string_update(data.content_warning.as_deref()),
     updated: Some(Some(naive_now())),
     ..Default::default()
   };
@@ -76,20 +107,22 @@ pub async fn update_site(
     enable_nsfw: data.enable_nsfw,
     community_creation_admin_only: data.community_creation_admin_only,
     require_email_verification: data.require_email_verification,
-    application_question: diesel_option_overwrite(data.application_question.clone()),
+    application_question: diesel_string_update(data.application_question.as_deref()),
     private_instance: data.private_instance,
     default_theme: data.default_theme.clone(),
     default_post_listing_type: data.default_post_listing_type,
-    legal_information: diesel_option_overwrite(data.legal_information.clone()),
+    default_sort_type: data.default_sort_type,
+    legal_information: diesel_string_update(data.legal_information.as_deref()),
     application_email_admins: data.application_email_admins,
     hide_modlog_mod_names: data.hide_modlog_mod_names,
     updated: Some(Some(naive_now())),
-    slur_filter_regex: diesel_option_overwrite(data.slur_filter_regex.clone()),
+    slur_filter_regex: diesel_string_update(data.slur_filter_regex.as_deref()),
     actor_name_max_length: data.actor_name_max_length,
     federation_enabled: data.federation_enabled,
     captcha_enabled: data.captcha_enabled,
     captcha_difficulty: data.captcha_difficulty.clone(),
     reports_email_admins: data.reports_email_admins,
+    default_post_listing_mode: data.default_post_listing_mode,
     ..Default::default()
   };
 
@@ -99,17 +132,17 @@ pub async fn update_site(
 
   let local_site_rate_limit_form = LocalSiteRateLimitUpdateForm {
     message: data.rate_limit_message,
-    message_per_second: data.rate_limit_message_per_second,
+    message_per_second: not_zero(data.rate_limit_message_per_second),
     post: data.rate_limit_post,
-    post_per_second: data.rate_limit_post_per_second,
+    post_per_second: not_zero(data.rate_limit_post_per_second),
     register: data.rate_limit_register,
-    register_per_second: data.rate_limit_register_per_second,
+    register_per_second: not_zero(data.rate_limit_register_per_second),
     image: data.rate_limit_image,
-    image_per_second: data.rate_limit_image_per_second,
+    image_per_second: not_zero(data.rate_limit_image_per_second),
     comment: data.rate_limit_comment,
-    comment_per_second: data.rate_limit_comment_per_second,
+    comment_per_second: not_zero(data.rate_limit_comment_per_second),
     search: data.rate_limit_search,
-    search_per_second: data.rate_limit_search_per_second,
+    search_per_second: not_zero(data.rate_limit_search_per_second),
     ..Default::default()
   };
 
@@ -123,10 +156,16 @@ pub async fn update_site(
   let blocked = data.blocked_instances.clone();
   FederationBlockList::replace(&mut context.pool(), blocked).await?;
 
+  if let Some(url_blocklist) = data.blocked_urls.clone() {
+    let parsed_urls = check_urls_are_valid(&url_blocklist)?;
+    LocalSiteUrlBlocklist::replace(&mut context.pool(), parsed_urls).await?;
+  }
+
   // TODO can't think of a better way to do this.
   // If the server suddenly requires email verification, or required applications, no old users
   // will be able to log in. It really only wants this to be a requirement for NEW signups.
-  // So if it was set from false, to true, you need to update all current users columns to be verified.
+  // So if it was set from false, to true, you need to update all current users columns to be
+  // verified.
 
   let old_require_application =
     local_site.registration_mode == RegistrationMode::RequireApplication;
@@ -153,7 +192,9 @@ pub async fn update_site(
   let new_taglines = data.taglines.clone();
   let taglines = Tagline::replace(&mut context.pool(), local_site.id, new_taglines).await?;
 
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+  let site_view = SiteView::read_local(&mut context.pool())
+    .await?
+    .ok_or(LemmyErrorType::LocalSiteNotSetup)?;
 
   let rate_limit_config =
     local_site_rate_limit_to_rate_limit_config(&site_view.local_site_rate_limit);
@@ -196,7 +237,9 @@ fn validate_update_payload(local_site: &LocalSite, edit_site: &EditSite) -> Lemm
   )?;
 
   // Ensure that the sidebar has fewer than the max num characters...
-  is_valid_body_field(&edit_site.sidebar, false)?;
+  if let Some(body) = &edit_site.sidebar {
+    is_valid_body_field(body, false)?;
+  }
 
   application_question_check(
     &local_site.application_question,
@@ -208,13 +251,13 @@ fn validate_update_payload(local_site: &LocalSite, edit_site: &EditSite) -> Lemm
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::indexing_slicing)]
 mod tests {
-  #![allow(clippy::unwrap_used)]
-  #![allow(clippy::indexing_slicing)]
 
   use crate::site::update::validate_update_payload;
   use lemmy_api_common::site::EditSite;
-  use lemmy_db_schema::{source::local_site::LocalSite, ListingType, RegistrationMode};
+  use lemmy_db_schema::{source::local_site::LocalSite, ListingType, RegistrationMode, SortType};
   use lemmy_utils::error::LemmyErrorType;
 
   #[test]
@@ -235,6 +278,7 @@ mod tests {
           None::<String>,
           None::<String>,
           None::<ListingType>,
+          None::<SortType>,
           None::<String>,
           None::<bool>,
           None::<bool>,
@@ -257,6 +301,7 @@ mod tests {
           None::<String>,
           None::<String>,
           None::<ListingType>,
+          None::<SortType>,
           Some(String::from("(zeta|alpha)")),
           None::<bool>,
           None::<bool>,
@@ -279,6 +324,7 @@ mod tests {
           None::<String>,
           None::<String>,
           Some(ListingType::Subscribed),
+          None::<SortType>,
           None::<String>,
           None::<bool>,
           None::<bool>,
@@ -301,6 +347,7 @@ mod tests {
           None::<String>,
           None::<String>,
           None::<ListingType>,
+          None::<SortType>,
           None::<String>,
           Some(true),
           Some(true),
@@ -323,6 +370,7 @@ mod tests {
           None::<String>,
           None::<String>,
           None::<ListingType>,
+          None::<SortType>,
           None::<String>,
           None::<bool>,
           Some(true),
@@ -345,6 +393,7 @@ mod tests {
           None::<String>,
           None::<String>,
           None::<ListingType>,
+          None::<SortType>,
           None::<String>,
           None::<bool>,
           None::<bool>,
@@ -398,6 +447,7 @@ mod tests {
           None::<String>,
           None::<String>,
           None::<ListingType>,
+          None::<SortType>,
           None::<String>,
           None::<bool>,
           None::<bool>,
@@ -419,6 +469,7 @@ mod tests {
           Some(String::new()),
           Some(String::new()),
           Some(ListingType::All),
+          Some(SortType::Active),
           Some(String::new()),
           Some(false),
           Some(true),
@@ -440,6 +491,7 @@ mod tests {
           None::<String>,
           None::<String>,
           None::<ListingType>,
+          None::<SortType>,
           Some(String::new()),
           None::<bool>,
           None::<bool>,
@@ -461,6 +513,7 @@ mod tests {
           None::<String>,
           None::<String>,
           None::<ListingType>,
+          None::<SortType>,
           None::<String>,
           None::<bool>,
           None::<bool>,
@@ -508,6 +561,7 @@ mod tests {
     site_description: Option<String>,
     site_sidebar: Option<String>,
     site_listing_type: Option<ListingType>,
+    site_sort_type: Option<SortType>,
     site_slur_filter_regex: Option<String>,
     site_is_private: Option<bool>,
     site_is_federated: Option<bool>,
@@ -528,6 +582,7 @@ mod tests {
       private_instance: site_is_private,
       default_theme: None,
       default_post_listing_type: site_listing_type,
+      default_sort_type: site_sort_type,
       legal_information: None,
       application_email_admins: None,
       hide_modlog_mod_names: None,
@@ -552,9 +607,12 @@ mod tests {
       captcha_difficulty: None,
       allowed_instances: None,
       blocked_instances: None,
+      blocked_urls: None,
       taglines: None,
       registration_mode: site_registration_mode,
       reports_email_admins: None,
+      content_warning: None,
+      default_post_listing_mode: None,
     }
   }
 }

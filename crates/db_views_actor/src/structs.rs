@@ -80,6 +80,7 @@ pub struct CommunityView {
   pub subscribed: SubscribedType,
   pub blocked: bool,
   pub counts: CommunityAggregates,
+  pub banned_from_community: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -107,6 +108,7 @@ pub struct PersonMentionView {
   pub recipient: Person,
   pub counts: CommentAggregates,
   pub creator_banned_from_community: bool,
+  pub banned_from_community: bool,
   pub creator_is_moderator: bool,
   pub creator_is_admin: bool,
   pub subscribed: SubscribedType,
@@ -130,6 +132,7 @@ pub struct CommentReplyView {
   pub recipient: Person,
   pub counts: CommentAggregates,
   pub creator_banned_from_community: bool,
+  pub banned_from_community: bool,
   pub creator_is_moderator: bool,
   pub creator_is_admin: bool,
   pub subscribed: SubscribedType,

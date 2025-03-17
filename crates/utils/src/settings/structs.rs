@@ -1,5 +1,6 @@
 use doku::Document;
 use serde::{Deserialize, Serialize};
+use smart_default::SmartDefault;
 use std::{
   env,
   net::{IpAddr, Ipv4Addr},
@@ -12,7 +13,6 @@ pub struct Settings {
   /// settings related to the postgresql database
   #[default(Default::default())]
   pub database: DatabaseConfig,
-  /// Settings related to activitypub federation
   /// Pictrs image server configuration.
   #[default(Some(Default::default()))]
   pub(crate) pictrs: Option<PictrsConfig>,
@@ -38,16 +38,13 @@ pub struct Settings {
   /// Whether the site is available over TLS. Needs to be true for federation to work.
   #[default(true)]
   pub tls_enabled: bool,
-  /// Set the URL for opentelemetry exports. If you do not have an opentelemetry collector, do not set this option
+  /// Set the URL for opentelemetry exports. If you do not have an opentelemetry collector, do not
+  /// set this option
   #[default(None)]
   #[doku(skip)]
   pub opentelemetry_url: Option<Url>,
-  /// The number of activitypub federation workers that can be in-flight concurrently
-  #[default(0)]
-  pub worker_count: usize,
-  /// The number of activitypub federation retry workers that can be in-flight concurrently
-  #[default(0)]
-  pub retry_count: usize,
+  #[default(Default::default())]
+  pub federation: FederationWorkerConfig,
   // Prometheus configuration.
   #[default(None)]
   #[doku(example = "Some(Default::default())")]
@@ -55,7 +52,7 @@ pub struct Settings {
   /// Sets a response Access-Control-Allow-Origin CORS header
   /// https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Origin
   #[default(None)]
-  #[doku(example = "*")]
+  #[doku(example = "lemmy.tld")]
   cors_origin: Option<String>,
 }
 
@@ -79,20 +76,56 @@ pub struct PictrsConfig {
   #[default(None)]
   pub api_key: Option<String>,
 
-  /// By default the thumbnails for external links are stored in pict-rs. This ensures that they
-  /// can be reliably retrieved and can be resized using pict-rs APIs. However it also increases
-  /// storage usage. In case this is disabled, the Opengraph image is directly returned as
-  /// thumbnail.
+  /// Backwards compatibility with 0.18.1. False is equivalent to `image_mode: None`, true is
+  /// equivalent to `image_mode: StoreLinkPreviews`.
   ///
-  /// In some countries it is forbidden to copy preview images from newspaper articles and only
-  /// hotlinking is allowed. If that is the case for your instance, make sure that this setting is
-  /// disabled.
-  #[default(true)]
-  pub cache_external_link_previews: bool,
+  /// To be removed in 0.20
+  pub(super) cache_external_link_previews: Option<bool>,
 
-  /// Timeout for uploading images to pictrs (in seconds)
+  /// Specifies how to handle remote images, so that users don't have to connect directly to remote
+  /// servers.
+  #[default(PictrsImageMode::StoreLinkPreviews)]
+  pub(super) image_mode: PictrsImageMode,
+
+  /// Allows bypassing proxy for specific image hosts when using ProxyAllImages.
+  ///
+  /// imgur.com is bypassed by default to avoid rate limit errors. When specifying any bypass
+  /// in the config, this default is ignored and you need to list imgur explicitly. To proxy imgur
+  /// requests, specify a noop bypass list, eg `proxy_bypass_domains ["example.org"]`.
+  #[default(vec!["i.imgur.com".to_string()])]
+  #[doku(example = "i.imgur.com")]
+  pub proxy_bypass_domains: Vec<String>,
+
+  /// Timeout for uploading images to pictrs (in seconds)
   #[default(30)]
   pub upload_timeout: u64,
+
+  /// Resize post thumbnails to this maximum width/height.
+  #[default(512)]
+  pub max_thumbnail_size: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, SmartDefault, Document, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub enum PictrsImageMode {
+  /// Leave images unchanged, don't generate any local thumbnails for post urls. Instead the
+  /// Opengraph image is directly returned as thumbnail
+  None,
+  /// Generate thumbnails for external post urls and store them persistently in pict-rs. This
+  /// ensures that they can be reliably retrieved and can be resized using pict-rs APIs. However
+  /// it also increases storage usage.
+  ///
+  /// This is the default behaviour, and also matches Lemmy 0.18.
+  #[default]
+  StoreLinkPreviews,
+  /// If enabled, all images from remote domains are rewritten to pass through
+  /// `/api/v3/image_proxy`, including embedded images in markdown. Images are stored temporarily
+  /// in pict-rs for caching. This improves privacy as users don't expose their IP to untrusted
+  /// servers, and decreases load on other servers. However it increases bandwidth use for the
+  /// local server.
+  ///
+  /// Requires pict-rs 0.5
+  ProxyAllImages,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, SmartDefault, Document)]
@@ -212,4 +245,15 @@ pub struct PrometheusConfig {
   #[default(10002)]
   #[doku(example = "10002")]
   pub port: i32,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, SmartDefault, Document)]
+#[serde(default)]
+// named federation"worker"config to disambiguate from the activitypub library configuration
+pub struct FederationWorkerConfig {
+  /// Limit to the number of concurrent outgoing federation requests per target instance.
+  /// Set this to a higher value than 1 (e.g. 6) only if you have a huge instance (>10 activities
+  /// per second) and if a receiving instance is not keeping up.
+  #[default(1)]
+  pub concurrent_sends_per_instance: i8,
 }

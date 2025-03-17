@@ -1,3 +1,4 @@
+use super::verify_is_remote_object;
 use crate::{
   check_apub_id_valid_with_strictness,
   objects::read_from_string_or_source,
@@ -12,16 +13,21 @@ use activitypub_federation::{
   traits::Object,
 };
 use chrono::{DateTime, Utc};
-use lemmy_api_common::{context::LemmyContext, utils::check_person_block};
+use lemmy_api_common::{
+  context::LemmyContext,
+  utils::{check_person_block, get_url_blocklist, local_site_opt_to_slur_regex, process_markdown},
+};
 use lemmy_db_schema::{
   source::{
+    local_site::LocalSite,
     person::Person,
     private_message::{PrivateMessage, PrivateMessageInsertForm},
   },
   traits::Crud,
+  utils::naive_now,
 };
 use lemmy_utils::{
-  error::{LemmyError, LemmyErrorType},
+  error::{LemmyError, LemmyErrorType, LemmyResult},
   utils::markdown::markdown_to_html,
 };
 use std::ops::Deref;
@@ -57,7 +63,7 @@ impl Object for ApubPrivateMessage {
   async fn read_from_id(
     object_id: Url,
     context: &Data<Self::DataType>,
-  ) -> Result<Option<Self>, LemmyError> {
+  ) -> LemmyResult<Option<Self>> {
     Ok(
       PrivateMessage::read_from_apub_id(&mut context.pool(), object_id)
         .await?
@@ -65,18 +71,22 @@ impl Object for ApubPrivateMessage {
     )
   }
 
-  async fn delete(self, _context: &Data<Self::DataType>) -> Result<(), LemmyError> {
+  async fn delete(self, _context: &Data<Self::DataType>) -> LemmyResult<()> {
     // do nothing, because pm can't be fetched over http
-    unimplemented!()
+    Err(LemmyErrorType::CouldntFindPrivateMessage.into())
   }
 
   #[tracing::instrument(skip_all)]
-  async fn into_json(self, context: &Data<Self::DataType>) -> Result<ChatMessage, LemmyError> {
+  async fn into_json(self, context: &Data<Self::DataType>) -> LemmyResult<ChatMessage> {
     let creator_id = self.creator_id;
-    let creator = Person::read(&mut context.pool(), creator_id).await?;
+    let creator = Person::read(&mut context.pool(), creator_id)
+      .await?
+      .ok_or(LemmyErrorType::CouldntFindPerson)?;
 
     let recipient_id = self.recipient_id;
-    let recipient = Person::read(&mut context.pool(), recipient_id).await?;
+    let recipient = Person::read(&mut context.pool(), recipient_id)
+      .await?
+      .ok_or(LemmyErrorType::CouldntFindPerson)?;
 
     let note = ChatMessage {
       r#type: ChatMessageType::ChatMessage,
@@ -97,9 +107,10 @@ impl Object for ApubPrivateMessage {
     note: &ChatMessage,
     expected_domain: &Url,
     context: &Data<Self::DataType>,
-  ) -> Result<(), LemmyError> {
+  ) -> LemmyResult<()> {
     verify_domains_match(note.id.inner(), expected_domain)?;
     verify_domains_match(note.attributed_to.inner(), note.id.inner())?;
+    verify_is_remote_object(&note.id, context)?;
 
     check_apub_id_valid_with_strictness(note.id.inner(), false, context).await?;
     let person = note.attributed_to.dereference(context).await?;
@@ -116,12 +127,16 @@ impl Object for ApubPrivateMessage {
   async fn from_json(
     note: ChatMessage,
     context: &Data<Self::DataType>,
-  ) -> Result<ApubPrivateMessage, LemmyError> {
+  ) -> LemmyResult<ApubPrivateMessage> {
     let creator = note.attributed_to.dereference(context).await?;
     let recipient = note.to[0].dereference(context).await?;
     check_person_block(creator.id, recipient.id, &mut context.pool()).await?;
 
+    let local_site = LocalSite::read(&mut context.pool()).await.ok();
+    let slur_regex = &local_site_opt_to_slur_regex(&local_site);
+    let url_blocklist = get_url_blocklist(context).await?;
     let content = read_from_string_or_source(&note.content, &None, &note.source);
+    let content = process_markdown(&content, slur_regex, &url_blocklist, context).await?;
 
     let form = PrivateMessageInsertForm {
       creator_id: creator.id,
@@ -134,7 +149,8 @@ impl Object for ApubPrivateMessage {
       ap_id: Some(note.id.into()),
       local: Some(false),
     };
-    let pm = PrivateMessage::create(&mut context.pool(), &form).await?;
+    let timestamp = note.updated.or(note.published).unwrap_or_else(naive_now);
+    let pm = PrivateMessage::insert_apub(&mut context.pool(), timestamp, &form).await?;
     Ok(pm.into())
   }
 }
@@ -146,13 +162,11 @@ mod tests {
     objects::{
       instance::{tests::parse_lemmy_instance, ApubSite},
       person::ApubPerson,
-      tests::init_context,
     },
     protocol::tests::file_to_json_object,
   };
   use assert_json_diff::assert_json_include;
   use lemmy_db_schema::source::site::Site;
-  use lemmy_utils::error::LemmyResult;
   use pretty_assertions::assert_eq;
   use serial_test::serial;
 
@@ -185,7 +199,7 @@ mod tests {
   #[tokio::test]
   #[serial]
   async fn test_parse_lemmy_pm() -> LemmyResult<()> {
-    let context = init_context().await?;
+    let context = LemmyContext::init_test_context().await;
     let url = Url::parse("https://enterprise.lemmy.ml/private_message/1621")?;
     let data = prepare_comment_test(&url, &context).await?;
     let json: ChatMessage = file_to_json_object("assets/lemmy/objects/chat_message.json")?;
@@ -208,7 +222,7 @@ mod tests {
   #[tokio::test]
   #[serial]
   async fn test_parse_pleroma_pm() -> LemmyResult<()> {
-    let context = init_context().await?;
+    let context = LemmyContext::init_test_context().await;
     let url = Url::parse("https://enterprise.lemmy.ml/private_message/1621")?;
     let data = prepare_comment_test(&url, &context).await?;
     let pleroma_url = Url::parse("https://queer.hacktivis.me/objects/2")?;

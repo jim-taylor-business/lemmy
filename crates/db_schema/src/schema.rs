@@ -6,6 +6,10 @@ pub mod sql_types {
     pub struct ActorTypeEnum;
 
     #[derive(diesel::sql_types::SqlType)]
+    #[diesel(postgres_type(name = "community_visibility"))]
+    pub struct CommunityVisibility;
+
+    #[derive(diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "listing_type_enum"))]
     pub struct ListingTypeEnum;
 
@@ -150,6 +154,9 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::CommunityVisibility;
+
     community (id) {
         id -> Int4,
         #[max_length = 255]
@@ -171,7 +178,7 @@ diesel::table! {
         icon -> Nullable<Text>,
         banner -> Nullable<Text>,
         #[max_length = 255]
-        followers_url -> Varchar,
+        followers_url -> Nullable<Varchar>,
         #[max_length = 255]
         inbox_url -> Varchar,
         #[max_length = 255]
@@ -183,6 +190,7 @@ diesel::table! {
         moderators_url -> Nullable<Varchar>,
         #[max_length = 255]
         featured_url -> Nullable<Varchar>,
+        visibility -> CommunityVisibility,
     }
 }
 
@@ -198,6 +206,7 @@ diesel::table! {
         users_active_month -> Int8,
         users_active_half_year -> Int8,
         hot_rank -> Float8,
+        subscribers_local -> Int8,
     }
 }
 
@@ -301,11 +310,11 @@ diesel::table! {
 }
 
 diesel::table! {
-    image_upload (pictrs_alias) {
-        local_user_id -> Int4,
-        pictrs_alias -> Text,
-        pictrs_delete_token -> Text,
-        published -> Timestamptz,
+    image_details (link) {
+        link -> Text,
+        width -> Int4,
+        height -> Int4,
+        content_type -> Text,
     }
 }
 
@@ -341,9 +350,20 @@ diesel::table! {
 }
 
 diesel::table! {
+    local_image (pictrs_alias) {
+        local_user_id -> Nullable<Int4>,
+        pictrs_alias -> Text,
+        pictrs_delete_token -> Text,
+        published -> Timestamptz,
+    }
+}
+
+diesel::table! {
     use diesel::sql_types::*;
     use super::sql_types::ListingTypeEnum;
     use super::sql_types::RegistrationModeEnum;
+    use super::sql_types::PostListingModeEnum;
+    use super::sql_types::SortTypeEnum;
 
     local_site (id) {
         id -> Int4,
@@ -371,6 +391,8 @@ diesel::table! {
         registration_mode -> RegistrationModeEnum,
         reports_email_admins -> Bool,
         federation_signed_fetch -> Bool,
+        default_post_listing_mode -> PostListingModeEnum,
+        default_sort_type -> SortTypeEnum,
     }
 }
 
@@ -393,6 +415,15 @@ diesel::table! {
         updated -> Nullable<Timestamptz>,
         import_user_settings -> Int4,
         import_user_settings_per_second -> Int4,
+    }
+}
+
+diesel::table! {
+    local_site_url_blocklist (id) {
+        id -> Int4,
+        url -> Text,
+        published -> Timestamptz,
+        updated -> Nullable<Timestamptz>,
     }
 }
 
@@ -438,6 +469,16 @@ diesel::table! {
     local_user_language (local_user_id, language_id) {
         local_user_id -> Int4,
         language_id -> Int4,
+    }
+}
+
+diesel::table! {
+    local_user_vote_display_mode (local_user_id) {
+        local_user_id -> Int4,
+        score -> Bool,
+        upvotes -> Bool,
+        downvotes -> Bool,
+        upvote_percentage -> Bool,
     }
 }
 
@@ -670,7 +711,7 @@ diesel::table! {
         id -> Int4,
         #[max_length = 200]
         name -> Varchar,
-        #[max_length = 512]
+        #[max_length = 2000]
         url -> Nullable<Varchar>,
         body -> Nullable<Text>,
         creator_id -> Int4,
@@ -691,6 +732,8 @@ diesel::table! {
         language_id -> Int4,
         featured_community -> Bool,
         featured_local -> Bool,
+        url_content_type -> Nullable<Text>,
+        alt_text -> Nullable<Text>,
     }
 }
 
@@ -713,6 +756,14 @@ diesel::table! {
         controversy_rank -> Float8,
         instance_id -> Int4,
         scaled_rank -> Float8,
+    }
+}
+
+diesel::table! {
+    post_hide (person_id, post_id) {
+        post_id -> Int4,
+        person_id -> Int4,
+        published -> Timestamptz,
     }
 }
 
@@ -807,6 +858,13 @@ diesel::table! {
 }
 
 diesel::table! {
+    remote_image (link) {
+        link -> Text,
+        published -> Timestamptz,
+    }
+}
+
+diesel::table! {
     secret (id) {
         id -> Int4,
         jwt_secret -> Varchar,
@@ -851,6 +909,7 @@ diesel::table! {
         private_key -> Nullable<Text>,
         public_key -> Text,
         instance_id -> Int4,
+        content_warning -> Nullable<Text>,
     }
 }
 
@@ -921,14 +980,15 @@ diesel::joinable!(email_verification -> local_user (local_user_id));
 diesel::joinable!(federation_allowlist -> instance (instance_id));
 diesel::joinable!(federation_blocklist -> instance (instance_id));
 diesel::joinable!(federation_queue_state -> instance (instance_id));
-diesel::joinable!(image_upload -> local_user (local_user_id));
 diesel::joinable!(instance_block -> instance (instance_id));
 diesel::joinable!(instance_block -> person (person_id));
+diesel::joinable!(local_image -> local_user (local_user_id));
 diesel::joinable!(local_site -> site (site_id));
 diesel::joinable!(local_site_rate_limit -> local_site (local_site_id));
 diesel::joinable!(local_user -> person (person_id));
 diesel::joinable!(local_user_language -> language (language_id));
 diesel::joinable!(local_user_language -> local_user (local_user_id));
+diesel::joinable!(local_user_vote_display_mode -> local_user (local_user_id));
 diesel::joinable!(login_token -> local_user (user_id));
 diesel::joinable!(mod_add_community -> community (community_id));
 diesel::joinable!(mod_ban_from_community -> community (community_id));
@@ -960,6 +1020,8 @@ diesel::joinable!(post_aggregates -> community (community_id));
 diesel::joinable!(post_aggregates -> instance (instance_id));
 diesel::joinable!(post_aggregates -> person (creator_id));
 diesel::joinable!(post_aggregates -> post (post_id));
+diesel::joinable!(post_hide -> person (person_id));
+diesel::joinable!(post_hide -> post (post_id));
 diesel::joinable!(post_like -> person (person_id));
 diesel::joinable!(post_like -> post (post_id));
 diesel::joinable!(post_read -> person (person_id));
@@ -1001,14 +1063,17 @@ diesel::allow_tables_to_appear_in_same_query!(
     federation_allowlist,
     federation_blocklist,
     federation_queue_state,
-    image_upload,
+    image_details,
     instance,
     instance_block,
     language,
+    local_image,
     local_site,
     local_site_rate_limit,
+    local_site_url_blocklist,
     local_user,
     local_user_language,
+    local_user_vote_display_mode,
     login_token,
     mod_add,
     mod_add_community,
@@ -1031,6 +1096,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     person_post_aggregates,
     post,
     post_aggregates,
+    post_hide,
     post_like,
     post_read,
     post_report,
@@ -1039,6 +1105,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     private_message_report,
     received_activity,
     registration_application,
+    remote_image,
     secret,
     sent_activity,
     site,

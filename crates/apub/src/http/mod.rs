@@ -13,10 +13,15 @@ use activitypub_federation::{
 use actix_web::{web, web::Bytes, HttpRequest, HttpResponse};
 use http::{header::LOCATION, StatusCode};
 use lemmy_api_common::context::LemmyContext;
-use lemmy_db_schema::{newtypes::DbUrl, source::activity::SentActivity};
-use lemmy_utils::error::{LemmyError, LemmyResult};
+use lemmy_db_schema::{
+  newtypes::DbUrl,
+  source::{activity::SentActivity, community::Community},
+  CommunityVisibility,
+};
+use lemmy_utils::error::{LemmyErrorType, LemmyResult};
 use serde::{Deserialize, Serialize};
-use std::ops::Deref;
+use std::{ops::Deref, time::Duration};
+use tokio::time::timeout;
 use url::Url;
 
 mod comment;
@@ -26,13 +31,22 @@ mod post;
 pub mod routes;
 pub mod site;
 
+const INCOMING_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(9);
+
 pub async fn shared_inbox(
   request: HttpRequest,
   body: Bytes,
   data: Data<LemmyContext>,
 ) -> LemmyResult<HttpResponse> {
-  receive_activity::<SharedInboxActivities, UserOrCommunity, LemmyContext>(request, body, &data)
+  let receive_fut =
+    receive_activity::<SharedInboxActivities, UserOrCommunity, LemmyContext>(request, body, &data);
+  // Set a timeout shorter than `REQWEST_TIMEOUT` for processing incoming activities. This is to
+  // avoid taking a long time to process an incoming activity when a required data fetch times out.
+  // In this case our own instance would timeout and be marked as dead by the sender. Better to
+  // consider the activity broken and move on.
+  timeout(INCOMING_ACTIVITY_TIMEOUT, receive_fut)
     .await
+    .map_err(|_| LemmyErrorType::InboxTimeout)?
 }
 
 /// Convert the data to json and turn it into an HTTP Response with the correct ActivityPub
@@ -84,7 +98,7 @@ pub struct ActivityQuery {
 pub(crate) async fn get_activity(
   info: web::Path<ActivityQuery>,
   context: web::Data<LemmyContext>,
-) -> Result<HttpResponse, LemmyError> {
+) -> LemmyResult<HttpResponse> {
   let settings = context.settings();
   let activity_id = Url::parse(&format!(
     "{}/activities/{}/{}",
@@ -93,7 +107,9 @@ pub(crate) async fn get_activity(
     info.id
   ))?
   .into();
-  let activity = SentActivity::read_from_apub_id(&mut context.pool(), &activity_id).await?;
+  let activity = SentActivity::read_from_apub_id(&mut context.pool(), &activity_id)
+    .await?
+    .ok_or(LemmyErrorType::CouldntFindActivity)?;
 
   let sensitive = activity.sensitive;
   if sensitive {
@@ -101,4 +117,15 @@ pub(crate) async fn get_activity(
   } else {
     create_apub_response(&activity.data)
   }
+}
+
+/// Ensure that the community is public and not removed/deleted.
+fn check_community_public(community: &Community) -> LemmyResult<()> {
+  if community.deleted || community.removed {
+    Err(LemmyErrorType::Deleted)?
+  }
+  if community.visibility != CommunityVisibility::Public {
+    return Err(LemmyErrorType::CouldntFindCommunity.into());
+  }
+  Ok(())
 }

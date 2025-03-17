@@ -9,8 +9,11 @@ use lemmy_api_common::{
     generate_inbox_url,
     generate_local_apub_endpoint,
     generate_shared_inbox_url,
+    get_url_blocklist,
     is_admin,
     local_site_to_slur_regex,
+    process_markdown_opt,
+    proxy_image_link_api,
     EndpointType,
   },
 };
@@ -27,13 +30,13 @@ use lemmy_db_schema::{
     },
   },
   traits::{ApubActor, Crud, Followable, Joinable},
-  utils::diesel_option_overwrite_to_url_create,
+  utils::diesel_url_create,
 };
 use lemmy_db_views::structs::{LocalUserView, SiteView};
 use lemmy_utils::{
-  error::{LemmyError, LemmyErrorExt, LemmyErrorType},
+  error::{LemmyErrorExt, LemmyErrorType, LemmyResult},
   utils::{
-    slurs::{check_slurs, check_slurs_opt},
+    slurs::check_slurs,
     validation::{is_valid_actor_name, is_valid_body_field},
   },
 };
@@ -43,25 +46,34 @@ pub async fn create_community(
   data: Json<CreateCommunity>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
-) -> Result<Json<CommunityResponse>, LemmyError> {
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+) -> LemmyResult<Json<CommunityResponse>> {
+  let site_view = SiteView::read_local(&mut context.pool())
+    .await?
+    .ok_or(LemmyErrorType::LocalSiteNotSetup)?;
   let local_site = site_view.local_site;
 
   if local_site.community_creation_admin_only && is_admin(&local_user_view).is_err() {
     Err(LemmyErrorType::OnlyAdminsCanCreateCommunities)?
   }
 
-  // Check to make sure the icon and banners are urls
-  let icon = diesel_option_overwrite_to_url_create(&data.icon)?;
-  let banner = diesel_option_overwrite_to_url_create(&data.banner)?;
-
   let slur_regex = local_site_to_slur_regex(&local_site);
+  let url_blocklist = get_url_blocklist(&context).await?;
   check_slurs(&data.name, &slur_regex)?;
   check_slurs(&data.title, &slur_regex)?;
-  check_slurs_opt(&data.description, &slur_regex)?;
+  let description =
+    process_markdown_opt(&data.description, &slur_regex, &url_blocklist, &context).await?;
+
+  let icon = diesel_url_create(data.icon.as_deref())?;
+  let icon = proxy_image_link_api(icon, &context).await?;
+
+  let banner = diesel_url_create(data.banner.as_deref())?;
+  let banner = proxy_image_link_api(banner, &context).await?;
 
   is_valid_actor_name(&data.name, local_site.actor_name_max_length as usize)?;
-  is_valid_body_field(&data.description, false)?;
+
+  if let Some(desc) = &data.description {
+    is_valid_body_field(desc, false)?;
+  }
 
   // Double check for duplicate community actor_ids
   let community_actor_id = generate_local_apub_endpoint(
@@ -81,7 +93,7 @@ pub async fn create_community(
   let community_form = CommunityInsertForm::builder()
     .name(data.name.clone())
     .title(data.title.clone())
-    .description(data.description.clone())
+    .description(description)
     .icon(icon)
     .banner(banner)
     .nsfw(data.nsfw)
@@ -93,6 +105,7 @@ pub async fn create_community(
     .shared_inbox_url(Some(generate_shared_inbox_url(context.settings())?))
     .posting_restricted_to_mods(data.posting_restricted_to_mods)
     .instance_id(site_view.site.instance_id)
+    .visibility(data.visibility)
     .build();
 
   let inserted_community = Community::create(&mut context.pool(), &community_form)

@@ -5,7 +5,11 @@ use lemmy_api_common::{
   context::LemmyContext,
   post::{CreatePostReport, PostReportResponse},
   send_activity::{ActivityChannel, SendActivityData},
-  utils::{check_community_user_action, send_new_report_email_to_admins},
+  utils::{
+    check_community_user_action,
+    check_post_deleted_or_removed,
+    send_new_report_email_to_admins,
+  },
 };
 use lemmy_db_schema::{
   source::{
@@ -15,7 +19,7 @@ use lemmy_db_schema::{
   traits::Reportable,
 };
 use lemmy_db_views::structs::{LocalUserView, PostReportView, PostView};
-use lemmy_utils::error::{LemmyError, LemmyErrorExt, LemmyErrorType};
+use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
 
 /// Creates a post report and notifies the moderators of the community
 #[tracing::instrument(skip(context))]
@@ -23,7 +27,7 @@ pub async fn create_post_report(
   data: Json<CreatePostReport>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
-) -> Result<Json<PostReportResponse>, LemmyError> {
+) -> LemmyResult<Json<PostReportResponse>> {
   let local_site = LocalSite::read(&mut context.pool()).await?;
 
   let reason = data.reason.trim().to_string();
@@ -31,7 +35,9 @@ pub async fn create_post_report(
 
   let person_id = local_user_view.person.id;
   let post_id = data.post_id;
-  let post_view = PostView::read(&mut context.pool(), post_id, None, false).await?;
+  let post_view = PostView::read(&mut context.pool(), post_id, None, false)
+    .await?
+    .ok_or(LemmyErrorType::CouldntFindPost)?;
 
   check_community_user_action(
     &local_user_view.person,
@@ -39,6 +45,8 @@ pub async fn create_post_report(
     &mut context.pool(),
   )
   .await?;
+
+  check_post_deleted_or_removed(&post_view.post)?;
 
   let report_form = PostReportForm {
     creator_id: person_id,
@@ -53,7 +61,9 @@ pub async fn create_post_report(
     .await
     .with_lemmy_type(LemmyErrorType::CouldntCreateReport)?;
 
-  let post_report_view = PostReportView::read(&mut context.pool(), report.id, person_id).await?;
+  let post_report_view = PostReportView::read(&mut context.pool(), report.id, person_id)
+    .await?
+    .ok_or(LemmyErrorType::CouldntFindPostReport)?;
 
   // Email the admins
   if local_site.reports_email_admins {
@@ -67,12 +77,12 @@ pub async fn create_post_report(
   }
 
   ActivityChannel::submit_activity(
-    SendActivityData::CreateReport(
-      post_view.post.ap_id.inner().clone(),
-      local_user_view.person,
-      post_view.community,
-      data.reason.clone(),
-    ),
+    SendActivityData::CreateReport {
+      object_id: post_view.post.ap_id.inner().clone(),
+      actor: local_user_view.person,
+      community: post_view.community,
+      reason: data.reason.clone(),
+    },
     &context,
   )
   .await?;

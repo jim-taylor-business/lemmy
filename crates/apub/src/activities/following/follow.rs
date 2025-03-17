@@ -24,8 +24,9 @@ use lemmy_db_schema::{
     person::{PersonFollower, PersonFollowerForm},
   },
   traits::Followable,
+  CommunityVisibility,
 };
-use lemmy_utils::error::LemmyError;
+use lemmy_utils::error::{LemmyError, LemmyErrorType, LemmyResult};
 use url::Url;
 
 impl Follow {
@@ -33,7 +34,7 @@ impl Follow {
     actor: &ApubPerson,
     community: &ApubCommunity,
     context: &Data<LemmyContext>,
-  ) -> Result<Follow, LemmyError> {
+  ) -> LemmyResult<Follow> {
     Ok(Follow {
       actor: actor.id().into(),
       object: community.id().into(),
@@ -51,7 +52,7 @@ impl Follow {
     actor: &ApubPerson,
     community: &ApubCommunity,
     context: &Data<LemmyContext>,
-  ) -> Result<(), LemmyError> {
+  ) -> LemmyResult<()> {
     let follow = Follow::new(actor, community, context)?;
     let inbox = if community.local {
       ActivitySendTargets::empty()
@@ -76,7 +77,7 @@ impl ActivityHandler for Follow {
   }
 
   #[tracing::instrument(skip_all)]
-  async fn verify(&self, context: &Data<LemmyContext>) -> Result<(), LemmyError> {
+  async fn verify(&self, context: &Data<LemmyContext>) -> LemmyResult<()> {
     verify_person(&self.actor, context).await?;
     let object = self.object.dereference(context).await?;
     if let UserOrCommunity::Community(c) = object {
@@ -89,7 +90,7 @@ impl ActivityHandler for Follow {
   }
 
   #[tracing::instrument(skip_all)]
-  async fn receive(self, context: &Data<LemmyContext>) -> Result<(), LemmyError> {
+  async fn receive(self, context: &Data<LemmyContext>) -> LemmyResult<()> {
     insert_received_activity(&self.id, context).await?;
     let actor = self.actor.dereference(context).await?;
     let object = self.object.dereference(context).await?;
@@ -103,6 +104,10 @@ impl ActivityHandler for Follow {
         PersonFollower::follow(&mut context.pool(), &form).await?;
       }
       UserOrCommunity::Community(c) => {
+        // Dont allow following local-only community via federation.
+        if c.visibility != CommunityVisibility::Public {
+          return Err(LemmyErrorType::CouldntFindCommunity.into());
+        }
         let form = CommunityFollowerForm {
           community_id: c.id,
           person_id: actor.id,

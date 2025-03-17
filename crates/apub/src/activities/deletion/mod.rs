@@ -29,7 +29,6 @@ use activitypub_federation::{
 };
 use lemmy_api_common::{context::LemmyContext, utils::purge_user_account};
 use lemmy_db_schema::{
-  newtypes::CommunityId,
   source::{
     activity::ActivitySendTargets,
     comment::{Comment, CommentUpdateForm},
@@ -40,7 +39,7 @@ use lemmy_db_schema::{
   },
   traits::Crud,
 };
-use lemmy_utils::error::LemmyError;
+use lemmy_utils::{error::LemmyResult, LemmyErrorType};
 use std::ops::Deref;
 use url::Url;
 
@@ -57,7 +56,7 @@ pub(crate) async fn send_apub_delete_in_community(
   reason: Option<String>,
   deleted: bool,
   context: &Data<LemmyContext>,
-) -> Result<(), LemmyError> {
+) -> LemmyResult<()> {
   let actor = ApubPerson::from(actor);
   let is_mod_action = reason.is_some();
   let activity = if deleted {
@@ -78,48 +77,17 @@ pub(crate) async fn send_apub_delete_in_community(
   .await
 }
 
-/// Parameter `reason` being set indicates that this is a removal by a mod. If its unset, this
-/// action was done by a normal user.
-#[tracing::instrument(skip_all)]
-pub(crate) async fn send_apub_delete_in_community_new(
-  actor: Person,
-  community_id: CommunityId,
-  object: DeletableObjects,
-  reason: Option<String>,
-  deleted: bool,
-  context: Data<LemmyContext>,
-) -> Result<(), LemmyError> {
-  let community = Community::read(&mut context.pool(), community_id).await?;
-  let actor = ApubPerson::from(actor);
-  let is_mod_action = reason.is_some();
-  let activity = if deleted {
-    let delete = Delete::new(&actor, object, public(), Some(&community), reason, &context)?;
-    AnnouncableActivities::Delete(delete)
-  } else {
-    let undo = UndoDelete::new(&actor, object, public(), Some(&community), reason, &context)?;
-    AnnouncableActivities::UndoDelete(undo)
-  };
-  send_activity_in_community(
-    activity,
-    &actor,
-    &community.into(),
-    ActivitySendTargets::empty(),
-    is_mod_action,
-    &context,
-  )
-  .await
-}
-
 #[tracing::instrument(skip_all)]
 pub(crate) async fn send_apub_delete_private_message(
   actor: &ApubPerson,
   pm: PrivateMessage,
   deleted: bool,
   context: Data<LemmyContext>,
-) -> Result<(), LemmyError> {
+) -> LemmyResult<()> {
   let recipient_id = pm.recipient_id;
   let recipient: ApubPerson = Person::read(&mut context.pool(), recipient_id)
     .await?
+    .ok_or(LemmyErrorType::CouldntFindPerson)?
     .into();
 
   let deletable = DeletableObjects::PrivateMessage(pm.into());
@@ -138,7 +106,7 @@ pub async fn send_apub_delete_user(
   person: Person,
   remove_data: bool,
   context: Data<LemmyContext>,
-) -> Result<(), LemmyError> {
+) -> LemmyResult<()> {
   let person: ApubPerson = person.into();
 
   let deletable = DeletableObjects::Person(person.clone());
@@ -164,7 +132,7 @@ impl DeletableObjects {
   pub(crate) async fn read_from_db(
     ap_id: &Url,
     context: &Data<LemmyContext>,
-  ) -> Result<DeletableObjects, LemmyError> {
+  ) -> LemmyResult<DeletableObjects> {
     if let Some(c) = ApubCommunity::read_from_id(ap_id.clone(), context).await? {
       return Ok(DeletableObjects::Community(c));
     }
@@ -199,7 +167,7 @@ pub(in crate::activities) async fn verify_delete_activity(
   activity: &Delete,
   is_mod_action: bool,
   context: &Data<LemmyContext>,
-) -> Result<(), LemmyError> {
+) -> LemmyResult<()> {
   let object = DeletableObjects::read_from_db(activity.object.id(), context).await?;
   match object {
     DeletableObjects::Community(community) => {
@@ -254,7 +222,7 @@ async fn verify_delete_post_or_comment(
   community: &ApubCommunity,
   is_mod_action: bool,
   context: &Data<LemmyContext>,
-) -> Result<(), LemmyError> {
+) -> LemmyResult<()> {
   verify_person_in_community(actor, community, context).await?;
   if is_mod_action {
     verify_mod_action(actor, community, context).await?;
@@ -273,7 +241,7 @@ async fn receive_delete_action(
   deleted: bool,
   do_purge_user_account: Option<bool>,
   context: &Data<LemmyContext>,
-) -> Result<(), LemmyError> {
+) -> LemmyResult<()> {
   match DeletableObjects::read_from_db(object, context).await? {
     DeletableObjects::Community(community) => {
       if community.local {

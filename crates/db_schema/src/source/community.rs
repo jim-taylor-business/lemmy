@@ -2,7 +2,9 @@
 use crate::schema::{community, community_follower, community_moderator, community_person_ban};
 use crate::{
   newtypes::{CommunityId, DbUrl, InstanceId, PersonId},
+  sensitive::SensitiveString,
   source::placeholder_apub_url,
+  CommunityVisibility,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -38,7 +40,7 @@ pub struct Community {
   /// Whether the community is local.
   pub local: bool,
   #[serde(skip)]
-  pub private_key: Option<String>,
+  pub private_key: Option<SensitiveString>,
   #[serde(skip)]
   pub public_key: String,
   #[serde(skip)]
@@ -48,8 +50,8 @@ pub struct Community {
   /// A URL for a banner.
   pub banner: Option<DbUrl>,
   #[cfg_attr(feature = "full", ts(skip))]
-  #[serde(skip, default = "placeholder_apub_url")]
-  pub followers_url: DbUrl,
+  #[serde(skip)]
+  pub followers_url: Option<DbUrl>,
   #[cfg_attr(feature = "full", ts(skip))]
   #[serde(skip, default = "placeholder_apub_url")]
   pub inbox_url: DbUrl,
@@ -66,9 +68,10 @@ pub struct Community {
   /// Url where featured posts collection is served over Activitypub
   #[serde(skip)]
   pub featured_url: Option<DbUrl>,
+  pub visibility: CommunityVisibility,
 }
 
-#[derive(Debug, Clone, TypedBuilder)]
+#[derive(Debug, Clone, TypedBuilder, Default)]
 #[builder(field_defaults(default))]
 #[cfg_attr(feature = "full", derive(Insertable, AsChangeset))]
 #[cfg_attr(feature = "full", diesel(table_name = community))]
@@ -99,6 +102,7 @@ pub struct CommunityInsertForm {
   pub posting_restricted_to_mods: Option<bool>,
   #[builder(!default)]
   pub instance_id: InstanceId,
+  pub visibility: Option<CommunityVisibility>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -126,6 +130,7 @@ pub struct CommunityUpdateForm {
   pub featured_url: Option<DbUrl>,
   pub hidden: Option<bool>,
   pub posting_restricted_to_mods: Option<bool>,
+  pub visibility: Option<CommunityVisibility>,
 }
 
 #[derive(PartialEq, Eq, Debug)]
