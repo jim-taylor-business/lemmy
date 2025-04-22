@@ -462,6 +462,7 @@ diesel::table! {
         enable_keyboard_navigation -> Bool,
         enable_animated_images -> Bool,
         collapse_bot_comments -> Bool,
+        last_donation_notification -> Timestamptz,
     }
 }
 
@@ -822,6 +823,7 @@ diesel::table! {
         #[max_length = 255]
         ap_id -> Varchar,
         local -> Bool,
+        removed -> Bool,
     }
 }
 

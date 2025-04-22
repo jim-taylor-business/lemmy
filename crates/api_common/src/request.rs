@@ -86,9 +86,11 @@ pub async fn fetch_link_metadata(
   }
 
   info!("Fetching site metadata for url: {}", url);
-  // We only fetch the first 64kB of data in order to not waste bandwidth especially for large
-  // binary files
-  let bytes_to_fetch = 64 * 1024;
+  // We only fetch the first MB of data in order to not waste bandwidth especially for large
+  // binary files. This high limit is particularly needed for youtube, which includes a lot of
+  // javascript code before the opengraph tags. Mastodon also uses a 1 MB limit:
+  // https://github.com/mastodon/mastodon/blob/295ad6f19a016b3f16e1201ffcbb1b3ad6b455a2/app/lib/request.rb#L213
+  let bytes_to_fetch = 1024 * 1024;
   let response = context
     .client()
     .get(url.as_str())
@@ -211,6 +213,13 @@ pub async fn generate_post_link_metadata(
   let allow_sensitive = local_site_opt_to_sensitive(&local_site);
   let allow_generate_thumbnail = allow_sensitive || !post.nsfw;
 
+  // Proxy the post url itself if it is an image
+  let url = if let (true, Some(url)) = (is_image_post, post.url.clone()) {
+    Some(Some(proxy_image_link(url.into(), &context).await?))
+  } else {
+    None
+  };
+
   let image_url = if is_image_post {
     post.url
   } else {
@@ -237,6 +246,7 @@ pub async fn generate_post_link_metadata(
   };
 
   let form = PostUpdateForm {
+    url,
     embed_title: Some(metadata.opengraph_data.title),
     embed_description: Some(metadata.opengraph_data.description),
     embed_video_url: Some(metadata.opengraph_data.embed_video_url),

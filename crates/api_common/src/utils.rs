@@ -1,10 +1,6 @@
 use crate::{
   context::LemmyContext,
-  request::{
-    delete_image_from_pictrs,
-    fetch_pictrs_proxied_image_details,
-    purge_image_from_pictrs,
-  },
+  request::{delete_image_from_pictrs, fetch_pictrs_proxied_image_details},
   site::{FederatedInstances, InstanceWithFederationState},
 };
 use chrono::{DateTime, Days, Local, TimeZone, Utc};
@@ -27,6 +23,7 @@ use lemmy_db_schema::{
     person::{Person, PersonUpdateForm},
     person_block::PersonBlock,
     post::{Post, PostRead},
+    private_message::PrivateMessage,
     site::Site,
   },
   traits::Crud,
@@ -569,17 +566,6 @@ pub async fn get_url_blocklist(context: &LemmyContext) -> LemmyResult<RegexSet> 
   )
 }
 
-pub async fn send_application_approved_email(
-  user: &LocalUserView,
-  settings: &Settings,
-) -> LemmyResult<()> {
-  let email = &user.local_user.email.clone().expect("email");
-  let lang = get_interface_language(user);
-  let subject = lang.registration_approved_subject(&user.person.actor_id);
-  let body = lang.registration_approved_body(&settings.hostname);
-  send_email(&subject, email, &user.person.name, &body, settings).await
-}
-
 /// Send a new applicant email notification to all admins
 pub async fn send_new_applicant_email_to_admins(
   applicant_username: &str,
@@ -626,15 +612,7 @@ pub async fn send_new_report_email_to_admins(
   Ok(())
 }
 
-pub fn check_private_instance_and_federation_enabled(local_site: &LocalSite) -> LemmyResult<()> {
-  if local_site.private_instance && local_site.federation_enabled {
-    Err(LemmyErrorType::CantEnablePrivateInstanceAndFederationTogether)?
-  } else {
-    Ok(())
-  }
-}
-
-/// Read the site for an actor_id.
+/// Read the site for an ap_id.
 ///
 /// Used for GetCommunityResponse and GetPersonDetails
 pub async fn read_site_for_actor(
@@ -644,26 +622,6 @@ pub async fn read_site_for_actor(
   let site_id = Site::instance_actor_id_from_url(actor_id.clone().into());
   let site = Site::read_from_apub_id(&mut context.pool(), &site_id.into()).await?;
   Ok(site)
-}
-
-pub async fn purge_image_posts_for_person(
-  banned_person_id: PersonId,
-  context: &LemmyContext,
-) -> LemmyResult<()> {
-  let pool = &mut context.pool();
-  let posts = Post::fetch_pictrs_posts_for_creator(pool, banned_person_id).await?;
-  for post in posts {
-    if let Some(url) = post.url {
-      purge_image_from_pictrs(&url, context).await.ok();
-    }
-    if let Some(thumbnail_url) = post.thumbnail_url {
-      purge_image_from_pictrs(&thumbnail_url, context).await.ok();
-    }
-  }
-
-  Post::remove_pictrs_post_images_and_thumbnails_for_creator(pool, banned_person_id).await?;
-
-  Ok(())
 }
 
 /// Delete a local_user's images
@@ -687,41 +645,11 @@ async fn delete_local_user_images(person_id: PersonId, context: &LemmyContext) -
   Ok(())
 }
 
-pub async fn purge_image_posts_for_community(
-  banned_community_id: CommunityId,
-  context: &LemmyContext,
-) -> LemmyResult<()> {
-  let pool = &mut context.pool();
-  let posts = Post::fetch_pictrs_posts_for_community(pool, banned_community_id).await?;
-  for post in posts {
-    if let Some(url) = post.url {
-      purge_image_from_pictrs(&url, context).await.ok();
-    }
-    if let Some(thumbnail_url) = post.thumbnail_url {
-      purge_image_from_pictrs(&thumbnail_url, context).await.ok();
-    }
-  }
-
-  Post::remove_pictrs_post_images_and_thumbnails_for_community(pool, banned_community_id).await?;
-
-  Ok(())
-}
-
 pub async fn remove_user_data(
   banned_person_id: PersonId,
   context: &LemmyContext,
 ) -> LemmyResult<()> {
   let pool = &mut context.pool();
-  // Purge user images
-  let person = Person::read(pool, banned_person_id)
-    .await?
-    .ok_or(LemmyErrorType::CouldntFindPerson)?;
-  if let Some(avatar) = person.avatar {
-    purge_image_from_pictrs(&avatar, context).await.ok();
-  }
-  if let Some(banner) = person.banner {
-    purge_image_from_pictrs(&banner, context).await.ok();
-  }
 
   // Update the fields to None
   Person::update(
@@ -739,8 +667,7 @@ pub async fn remove_user_data(
   // Posts
   Post::update_removed_for_creator(pool, banned_person_id, None, true).await?;
 
-  // Purge image posts
-  purge_image_posts_for_person(banned_person_id, context).await?;
+  delete_local_user_images(banned_person_id, context).await?;
 
   // Communities
   // Remove all communities where they're the top mod
@@ -765,13 +692,6 @@ pub async fn remove_user_data(
     )
     .await?;
 
-    // Delete the community images
-    if let Some(icon) = first_mod_community.community.icon {
-      purge_image_from_pictrs(&icon, context).await.ok();
-    }
-    if let Some(banner) = first_mod_community.community.banner {
-      purge_image_from_pictrs(&banner, context).await.ok();
-    }
     // Update the fields to None
     Community::update(
       pool,
@@ -787,6 +707,9 @@ pub async fn remove_user_data(
 
   // Comments
   Comment::update_removed_for_creator(pool, banned_person_id, true).await?;
+
+  // Private messages
+  PrivateMessage::update_removed_for_creator(pool, banned_person_id, true).await?;
 
   Ok(())
 }
@@ -828,23 +751,9 @@ pub async fn remove_user_data_in_community(
 pub async fn purge_user_account(person_id: PersonId, context: &LemmyContext) -> LemmyResult<()> {
   let pool = &mut context.pool();
 
-  let person = Person::read(pool, person_id)
-    .await?
-    .ok_or(LemmyErrorType::CouldntFindPerson)?;
-
   // Delete their local images, if they're a local user
-  delete_local_user_images(person_id, context).await.ok();
-
   // No need to update avatar and banner, those are handled in Person::delete_account
-  if let Some(avatar) = person.avatar {
-    purge_image_from_pictrs(&avatar, context).await.ok();
-  }
-  if let Some(banner) = person.banner {
-    purge_image_from_pictrs(&banner, context).await.ok();
-  }
-
-  // Purge image posts
-  purge_image_posts_for_person(person_id, context).await.ok();
+  delete_local_user_images(person_id, context).await.ok();
 
   // Comments
   Comment::permadelete_for_creator(pool, person_id)
