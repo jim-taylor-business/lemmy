@@ -53,7 +53,19 @@ use strum::{Display, EnumString};
 use ts_rs::TS;
 
 #[derive(
-  EnumString, Display, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Hash, Ord,
+  EnumString,
+  Display,
+  Debug,
+  Serialize,
+  Deserialize,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Default,
+  Hash,
+  PartialOrd,
+  Ord,
 )]
 #[cfg_attr(feature = "full", derive(DbEnum, TS))]
 #[cfg_attr(
@@ -100,7 +112,19 @@ pub enum CommentSortType {
 }
 
 #[derive(
-  EnumString, Display, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Hash, Ord,
+  EnumString,
+  Display,
+  Debug,
+  Serialize,
+  Deserialize,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Default,
+  Hash,
+  PartialOrd,
+  Ord,
 )]
 #[cfg_attr(feature = "full", derive(DbEnum, TS))]
 #[cfg_attr(
