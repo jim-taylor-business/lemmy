@@ -1,16 +1,17 @@
+use super::{handle_community_moderators, person::ApubPerson};
 use crate::{
   activities::GetActorType,
-  check_apub_id_valid,
-  local_site_data_cached,
+  fetcher::user_or_community::PersonOrGroupType,
   objects::{instance::fetch_instance_actor_for_object, read_from_string_or_source_opt},
   protocol::{
-    objects::{group::Group, Endpoints, LanguageTag},
+    objects::{group::Group, AttributedTo, Endpoints, LanguageTag},
     ImageObject,
     Source,
   },
 };
 use activitypub_federation::{
   config::Data,
+  fetch::object_id::ObjectId,
   kinds::actor::GroupType,
   traits::{Actor, Object},
 };
@@ -38,7 +39,6 @@ use lemmy_db_schema::{
   traits::{ApubActor, Crud},
   utils::naive_now,
 };
-use lemmy_db_views_actor::structs::CommunityFollowerView;
 use lemmy_utils::{
   error::{LemmyError, LemmyResult},
   spawn_try_task,
@@ -123,7 +123,9 @@ impl Object for ApubCommunity {
       published: Some(self.published),
       updated: self.updated,
       posting_restricted_to_mods: Some(self.posting_restricted_to_mods),
-      attributed_to: Some(generate_moderators_url(&self.actor_id)?.into()),
+      attributed_to: Some(AttributedTo::Lemmy(
+        generate_moderators_url(&self.actor_id)?.into(),
+      )),
     };
     Ok(group)
   }
@@ -168,7 +170,7 @@ impl Object for ApubCommunity {
       followers_url: group.followers.clone().map(Into::into),
       inbox_url: Some(group.inbox.into()),
       shared_inbox_url: group.endpoints.map(|e| e.shared_inbox.into()),
-      moderators_url: group.attributed_to.clone().map(Into::into),
+      moderators_url: group.attributed_to.clone().and_then(AttributedTo::url),
       posting_restricted_to_mods: group.posting_restricted_to_mods,
       instance_id,
       featured_url: group.featured.clone().map(Into::into),
@@ -183,12 +185,6 @@ impl Object for ApubCommunity {
       .into();
     CommunityLanguage::update(&mut context.pool(), languages, community.id).await?;
 
-    // Need to fetch mods synchronously, otherwise fetching a post in community with
-    // `posting_restricted_to_mods` can fail if mods havent been fetched yet.
-    if let Some(moderators) = group.attributed_to {
-      moderators.dereference(&community, context).await.ok();
-    }
-
     // These collections are not necessary for Lemmy to work, so ignore errors.
     let community_ = community.clone();
     let context_ = context.reset_request_count();
@@ -199,6 +195,23 @@ impl Object for ApubCommunity {
       }
       if let Some(featured) = group.featured {
         featured.dereference(&community_, &context_).await.ok();
+      }
+      if let Some(moderators) = group.attributed_to {
+        if let AttributedTo::Lemmy(l) = moderators {
+          l.moderators()
+            .dereference(&community_, &context_)
+            .await
+            .ok();
+        } else if let AttributedTo::Peertube(p) = moderators {
+          let new_mods = p
+            .iter()
+            .filter(|p| p.kind == PersonOrGroupType::Person)
+            .map(|p| ObjectId::<ApubPerson>::from(p.id.clone().into_inner()))
+            .collect();
+          handle_community_moderators(&new_mods, &community_, &context_)
+            .await
+            .ok();
+        }
       }
       Ok(())
     });
@@ -232,27 +245,6 @@ impl Actor for ApubCommunity {
 impl GetActorType for ApubCommunity {
   fn actor_type(&self) -> ActorType {
     ActorType::Community
-  }
-}
-
-impl ApubCommunity {
-  /// For a given community, returns the inboxes of all followers.
-  #[tracing::instrument(skip_all)]
-  pub(crate) async fn get_follower_inboxes(&self, context: &LemmyContext) -> LemmyResult<Vec<Url>> {
-    let id = self.id;
-
-    let local_site_data = local_site_data_cached(&mut context.pool()).await?;
-    let follows =
-      CommunityFollowerView::get_community_follower_inboxes(&mut context.pool(), id).await?;
-    let inboxes: Vec<Url> = follows
-      .into_iter()
-      .map(Into::into)
-      .filter(|inbox: &Url| inbox.host_str() != Some(&context.settings().hostname))
-      // Don't send to blocked instances
-      .filter(|inbox| check_apub_id_valid(inbox, &local_site_data).is_ok())
-      .collect();
-
-    Ok(inboxes)
   }
 }
 

@@ -10,11 +10,11 @@ use actix_web::{
   Responder,
 };
 use futures::stream::{Stream, StreamExt};
-use lemmy_api_common::{context::LemmyContext, request::PictrsResponse};
-use lemmy_db_schema::source::{
-  images::{LocalImage, LocalImageForm, RemoteImage},
-  local_site::LocalSite,
+use lemmy_api_common::{
+  context::LemmyContext,
+  request::{delete_image_from_pictrs, PictrsResponse},
 };
+use lemmy_db_schema::source::images::{LocalImage, LocalImageForm, RemoteImage};
 use lemmy_db_views::structs::LocalUserView;
 use lemmy_utils::{error::LemmyResult, rate_limit::RateLimitCell, REQWEST_TIMEOUT};
 use reqwest::Body;
@@ -172,13 +172,7 @@ async fn full_res(
   req: HttpRequest,
   client: Data<ClientWithMiddleware>,
   context: Data<LemmyContext>,
-  local_user_view: Option<LocalUserView>,
 ) -> LemmyResult<HttpResponse> {
-  // block access to images if instance is private and unauthorized, public
-  let local_site = LocalSite::read(&mut context.pool()).await?;
-  if local_site.private_instance && local_user_view.is_none() {
-    return Ok(HttpResponse::Unauthorized().finish());
-  }
   let name = &filename.into_inner();
 
   // If there are no query params, the URL is original
@@ -221,28 +215,24 @@ async fn image(
 
 async fn delete(
   components: Path<(String, String)>,
-  req: HttpRequest,
-  client: Data<ClientWithMiddleware>,
   context: Data<LemmyContext>,
-  // require login
-  _local_user_view: LocalUserView,
+  local_user_view: LocalUserView,
 ) -> LemmyResult<HttpResponse> {
-  let (token, file) = components.into_inner();
+  // Deletion token is accepted for backwards API compatibility but no longer used for validation or
+  // performing the deletion. It is not necessary to validate the token, as we validate that the
+  // user is authorized by being an admin or by matching the local_user_id of the local_image to
+  // their local_user.id.
+  let (_token, alias) = components.into_inner();
 
-  let pictrs_config = context.settings().pictrs_config()?;
-  let url = format!("{}image/delete/{}/{}", pictrs_config.url, &token, &file);
+  let image =
+    LocalImage::delete_by_alias_and_user(&mut context.pool(), &local_user_view.local_user, &alias)
+      .await?;
 
-  let mut client_req = adapt_request(&req, &client, url);
+  delete_image_from_pictrs(&image.pictrs_alias, &image.pictrs_delete_token, &context).await?;
 
-  if let Some(addr) = req.head().peer_addr {
-    client_req = client_req.header("X-Forwarded-For", addr.to_string());
-  }
-
-  let res = client_req.send().await?;
-
-  LocalImage::delete_by_alias(&mut context.pool(), &file).await?;
-
-  Ok(HttpResponse::build(res.status()).body(BodyStream::new(res.bytes_stream())))
+  // This replicates older behavior from when we passed through the pict-rs API response to avoid a
+  // breaking change. See https://git.asonix.dog/asonix/pict-rs/src/commit/38d5f185775837ad0203d5006c65ec201d3109fa/src/lib.rs#L788
+  Ok(HttpResponse::NoContent().finish())
 }
 
 async fn healthz(

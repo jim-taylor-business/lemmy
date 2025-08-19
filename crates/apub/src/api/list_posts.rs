@@ -43,6 +43,7 @@ pub async fn list_posts(
   let saved_only = data.saved_only;
   let show_hidden = data.show_hidden;
   let show_read = data.show_read;
+  // Show nsfw content if param is true, or if content_warning exists
   let show_nsfw = data.show_nsfw;
 
   let liked_only = data.liked_only;

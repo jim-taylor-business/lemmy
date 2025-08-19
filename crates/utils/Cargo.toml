@@ -7,6 +7,7 @@ license.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 [lib]
 name = "lemmy_utils"
@@ -70,7 +71,7 @@ uuid = { workspace = true, features = ["serde", "v4"], optional = true }
 rosetta-i18n = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 urlencoding = { workspace = true, optional = true }
-html2text = { version = "0.12.5", optional = true }
+html2text = { version = "0.12.6", optional = true }
 deser-hjson = { version = "2.2.4", optional = true }
 smart-default = { version = "0.7.1", optional = true }
 lettre = { version = "0.11.7", default-features = false, features = [
@@ -84,6 +85,7 @@ ts-rs = { workspace = true, optional = true }
 enum-map = { workspace = true, optional = true }
 cfg-if = "1"
 clearurls = { version = "0.0.4", features = ["linkify"] }
+git-version = "0.3.9"
 
 [dev-dependencies]
 reqwest = { workspace = true }
