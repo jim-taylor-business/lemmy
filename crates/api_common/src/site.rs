@@ -302,7 +302,7 @@ pub struct SiteResponse {
 }
 
 #[skip_serializing_none]
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "full", derive(TS))]
 #[cfg_attr(feature = "full", ts(export))]
 /// An expanded response for a site.
@@ -330,7 +330,7 @@ pub struct GetFederatedInstancesResponse {
   pub federated_instances: Option<FederatedInstances>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "full", derive(TS))]
 #[cfg_attr(feature = "full", ts(export))]
 /// Your user info.

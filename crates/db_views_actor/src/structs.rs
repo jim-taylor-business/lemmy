@@ -19,7 +19,7 @@ use serde_with::skip_serializing_none;
 #[cfg(feature = "full")]
 use ts_rs::TS;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "full", derive(TS, Queryable))]
 #[cfg_attr(feature = "full", diesel(check_for_backend(diesel::pg::Pg)))]
 #[cfg_attr(feature = "full", ts(export))]
@@ -30,7 +30,7 @@ pub struct CommunityBlockView {
 }
 
 #[skip_serializing_none]
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "full", derive(TS, Queryable))]
 #[cfg_attr(feature = "full", diesel(check_for_backend(diesel::pg::Pg)))]
 #[cfg_attr(feature = "full", ts(export))]
@@ -41,7 +41,7 @@ pub struct InstanceBlockView {
   pub site: Option<Site>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "full", derive(TS, Queryable))]
 #[cfg_attr(feature = "full", diesel(check_for_backend(diesel::pg::Pg)))]
 #[cfg_attr(feature = "full", ts(export))]
@@ -51,7 +51,7 @@ pub struct CommunityFollowerView {
   pub follower: Person,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "full", derive(TS, Queryable))]
 #[cfg_attr(feature = "full", diesel(check_for_backend(diesel::pg::Pg)))]
 #[cfg_attr(feature = "full", ts(export))]
@@ -83,7 +83,7 @@ pub struct CommunityView {
   pub banned_from_community: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "full", derive(TS, Queryable))]
 #[cfg_attr(feature = "full", diesel(check_for_backend(diesel::pg::Pg)))]
 #[cfg_attr(feature = "full", ts(export))]
@@ -118,7 +118,7 @@ pub struct PersonMentionView {
 }
 
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "full", derive(TS, Queryable))]
 #[cfg_attr(feature = "full", diesel(check_for_backend(diesel::pg::Pg)))]
 #[cfg_attr(feature = "full", ts(export))]
@@ -141,7 +141,7 @@ pub struct CommentReplyView {
   pub my_vote: Option<i16>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "full", derive(TS, Queryable))]
 #[cfg_attr(feature = "full", diesel(check_for_backend(diesel::pg::Pg)))]
 #[cfg_attr(feature = "full", ts(export))]
