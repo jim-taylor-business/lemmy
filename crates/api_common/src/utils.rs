@@ -43,12 +43,14 @@ use lemmy_utils::{
   error::{LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult},
   rate_limit::{ActionType, BucketConfig},
   settings::structs::{PictrsImageMode, Settings},
+  spawn_try_task,
   utils::{
     markdown::{markdown_check_for_blocked_urls, markdown_rewrite_image_links},
     slurs::{build_slur_regex, remove_slurs},
     validation::clean_urls_in_text,
   },
   CACHE_DURATION_FEDERATION,
+  MAX_COMMENT_DEPTH_LIMIT,
 };
 use moka::future::Cache;
 use regex::{escape, Regex, RegexSet};
@@ -556,7 +558,9 @@ pub async fn get_url_blocklist(context: &LemmyContext) -> LemmyResult<RegexSet> 
         let urls = LocalSiteUrlBlocklist::get_all(&mut context.pool()).await?;
 
         // The urls are already validated on saving, so just escape them.
-        let regexes = urls.iter().map(|url| escape(&url.url));
+        // If this regex creation changes it must be synced with
+        // lemmy_utils::utils::markdown::create_url_blocklist_test_regex_set.
+        let regexes = urls.iter().map(|url| format!(r"\b{}\b", escape(&url.url)));
 
         let set = RegexSet::new(regexes)?;
         Ok(set)
@@ -625,24 +629,28 @@ pub async fn read_site_for_actor(
 }
 
 /// Delete a local_user's images
-async fn delete_local_user_images(person_id: PersonId, context: &LemmyContext) -> LemmyResult<()> {
-  if let Ok(Some(local_user)) = LocalUserView::read_person(&mut context.pool(), person_id).await {
-    let pictrs_uploads =
-      LocalImageView::get_all_by_local_user_id(&mut context.pool(), local_user.local_user.id)
-        .await?;
+async fn delete_local_user_images(person_id: PersonId, context: &LemmyContext) {
+  let context_ = context.clone();
+  spawn_try_task(async move {
+    if let Ok(Some(local_user)) = LocalUserView::read_person(&mut context_.pool(), person_id).await
+    {
+      let pictrs_uploads =
+        LocalImageView::get_all_by_local_user_id(&mut context_.pool(), local_user.local_user.id)
+          .await?;
 
-    // Delete their images
-    for upload in pictrs_uploads {
-      delete_image_from_pictrs(
-        &upload.local_image.pictrs_alias,
-        &upload.local_image.pictrs_delete_token,
-        context,
-      )
-      .await
-      .ok();
+      // Delete their images
+      for upload in pictrs_uploads {
+        delete_image_from_pictrs(
+          &upload.local_image.pictrs_alias,
+          &upload.local_image.pictrs_delete_token,
+          &context_,
+        )
+        .await
+        .ok();
+      }
     }
-  }
-  Ok(())
+    Ok(())
+  });
 }
 
 pub async fn remove_user_data(
@@ -667,7 +675,7 @@ pub async fn remove_user_data(
   // Posts
   Post::update_removed_for_creator(pool, banned_person_id, None, true).await?;
 
-  delete_local_user_images(banned_person_id, context).await?;
+  delete_local_user_images(banned_person_id, context).await;
 
   // Communities
   // Remove all communities where they're the top mod
@@ -753,7 +761,7 @@ pub async fn purge_user_account(person_id: PersonId, context: &LemmyContext) -> 
 
   // Delete their local images, if they're a local user
   // No need to update avatar and banner, those are handled in Person::delete_account
-  delete_local_user_images(person_id, context).await.ok();
+  delete_local_user_images(person_id, context).await;
 
   // Comments
   Comment::permadelete_for_creator(pool, person_id)
@@ -984,12 +992,31 @@ fn build_proxied_image_url(
   ))
 }
 
+/// Returns error if new comment exceeds maximum depth.
+///
+/// Top-level comments have a path like `0.123` where 123 is the comment id. At the second level
+/// it is `0.123.456`, containing the parent id and current comment id.
+pub fn check_comment_depth(comment: &Comment) -> LemmyResult<()> {
+  let path = &comment.path.0;
+  let length = path.split('.').count();
+  // Need to increment by one because the path always starts with 0
+  if length > MAX_COMMENT_DEPTH_LIMIT + 1 {
+    Err(LemmyErrorType::MaxCommentDepthReached)?
+  } else {
+    Ok(())
+  }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 #[allow(clippy::indexing_slicing)]
 mod tests {
 
   use super::*;
+  use lemmy_db_schema::{
+    newtypes::{CommentId, LanguageId},
+    Ltree,
+  };
   use pretty_assertions::assert_eq;
   use serial_test::serial;
 
@@ -1065,5 +1092,38 @@ mod tests {
         .await
         .is_ok()
     );
+  }
+
+  #[test]
+  fn test_comment_depth() -> LemmyResult<()> {
+    let mut comment = Comment {
+      id: CommentId(0),
+      creator_id: PersonId(0),
+      post_id: PostId(0),
+      content: String::new(),
+      removed: false,
+      published: Utc::now(),
+      updated: None,
+      deleted: false,
+      ap_id: Url::parse("http://example.com")?.into(),
+      local: false,
+      path: Ltree("0.123".to_string()),
+      distinguished: false,
+      language_id: LanguageId(0),
+    };
+    assert!(check_comment_depth(&comment).is_ok());
+    comment.path = Ltree("0.123.456".to_string());
+    assert!(check_comment_depth(&comment).is_ok());
+
+    // build path with items 1 to 50 which is still acceptable
+    let mut path = "0.1.2.3.4.5.6.7.8.9.10.11.12.13.14.15.16.17.18.19.20.21.22.23.24.25.26.27.28.29.30.31.32.33.34.35.36.37.38.39.40.41.42.43.44.45.46.47.48.49.50".to_string();
+    comment.path = Ltree(path.clone());
+    assert!(check_comment_depth(&comment).is_ok());
+
+    // add one more item and we exceed the max depth
+    path.push_str(".51");
+    comment.path = Ltree(path);
+    assert!(check_comment_depth(&comment).is_err());
+    Ok(())
   }
 }
