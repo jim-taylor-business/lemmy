@@ -56,6 +56,7 @@ use url::Url;
 
 const FETCH_LIMIT_DEFAULT: i64 = 10;
 pub const FETCH_LIMIT_MAX: i64 = 50;
+pub const PAGE_LIMIT_MAX: i64 = 100;
 pub const SITEMAP_LIMIT: i64 = 50000;
 pub const SITEMAP_DAYS: Option<TimeDelta> = TimeDelta::try_days(31);
 pub const RANK_DEFAULT: f64 = 0.0001;
@@ -256,8 +257,10 @@ pub fn limit_and_offset(
 ) -> Result<(i64, i64), diesel::result::Error> {
   let page = match page {
     Some(page) => {
-      if page < 1 {
-        return Err(QueryBuilderError("Page is < 1".into()));
+      if !(1..=PAGE_LIMIT_MAX).contains(&page) {
+        return Err(QueryBuilderError(
+          format!("Page limit is > {PAGE_LIMIT_MAX}").into(),
+        ));
       }
       page
     }
@@ -437,7 +440,7 @@ pub async fn build_db_pool() -> LemmyResult<ActualDbPool> {
       // from the pool
       let conn_was_used = metrics.recycled.is_some();
       if metrics.age() > Duration::from_secs(3 * 24 * 60 * 60) && conn_was_used {
-        Err(HookError::Continue(None))
+        Err(HookError::Message("Connection is too old".into()))
       } else {
         Ok(())
       }
@@ -482,6 +485,7 @@ static EMAIL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     .expect("compile email regex")
 });
 
+#[allow(deprecated)]
 pub mod functions {
   use diesel::sql_types::{BigInt, Bool, Text, Timestamptz};
 
