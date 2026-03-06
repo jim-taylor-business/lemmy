@@ -16,11 +16,17 @@ use lemmy_api_common::{
 };
 use lemmy_db_schema::source::images::{LocalImage, LocalImageForm, RemoteImage};
 use lemmy_db_views::structs::LocalUserView;
-use lemmy_utils::{error::LemmyResult, rate_limit::RateLimitCell, REQWEST_TIMEOUT};
+use lemmy_utils::{
+  error::{LemmyErrorExt, LemmyResult},
+  rate_limit::RateLimitCell,
+  LemmyErrorType,
+  REQWEST_TIMEOUT,
+};
 use reqwest::Body;
 use reqwest_middleware::{ClientWithMiddleware, RequestBuilder};
 use serde::Deserialize;
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
+use strum::{Display, EnumString};
 use url::Url;
 
 pub fn config(cfg: &mut ServiceConfig, client: ClientWithMiddleware, rate_limit: &RateLimitCell) {
@@ -55,10 +61,7 @@ impl ProcessUrl for PictrsGetParams {
       format!("{}image/original/{}", pictrs_url, src)
     } else {
       // Take file type from name, or jpg if nothing is given
-      let format = self
-        .clone()
-        .format
-        .unwrap_or_else(|| src.split('.').last().unwrap_or("jpg").to_string());
+      let format = file_type(self.format.clone(), src).unwrap_or_default();
 
       let mut url = format!("{}image/process.{}?src={}", pictrs_url, format, src);
 
@@ -68,6 +71,28 @@ impl ProcessUrl for PictrsGetParams {
       url
     }
   }
+}
+
+#[derive(EnumString, Display, PartialEq, Debug, Default)]
+#[strum(ascii_case_insensitive, serialize_all = "snake_case")]
+enum PictrsFileType {
+  Apng,
+  Avif,
+  Gif,
+  #[default]
+  Jpg,
+  Jxl,
+  Png,
+  Webp,
+}
+
+/// Take file type from param, name, or use jpg if nothing is given
+fn file_type(file_type: Option<String>, name: &str) -> LemmyResult<PictrsFileType> {
+  let type_str = file_type
+    .clone()
+    .unwrap_or_else(|| name.split('.').next_back().unwrap_or("jpg").to_string());
+
+  PictrsFileType::from_str(&type_str).with_lemmy_type(LemmyErrorType::NotAnImageType)
 }
 
 #[derive(Deserialize, Clone)]
@@ -83,10 +108,7 @@ impl ProcessUrl for ImageProxyParams {
       format!("{}image/original?proxy={}", pictrs_url, proxy_url)
     } else {
       // Take file type from name, or jpg if nothing is given
-      let format = self
-        .clone()
-        .format
-        .unwrap_or_else(|| proxy_url.split('.').last().unwrap_or("jpg").to_string());
+      let format = file_type(self.format.clone(), proxy_url).unwrap_or_default();
 
       let mut url = format!("{}image/process.{}?proxy={}", pictrs_url, format, proxy_url);
 
@@ -321,5 +343,53 @@ where
     cx: &mut std::task::Context<'_>,
   ) -> std::task::Poll<Option<Self::Item>> {
     std::pin::Pin::new(&mut self.rx).poll_recv(cx)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::images::{file_type, PictrsFileType};
+  use lemmy_utils::error::LemmyResult;
+
+  #[tokio::test]
+  async fn image_file_type_tests() -> LemmyResult<()> {
+    // Make sure files type outputs are getting lower-cased
+    assert_eq!(PictrsFileType::Jpg.to_string(), "jpg".to_string());
+
+    let file_url = "a8a7f07f-3ef2-40fa-849c-ae952f68f3ec.jpg";
+
+    // Make sure wrong-cased file type requests are okay
+    assert_eq!(
+      PictrsFileType::Jpg,
+      file_type(Some("JPg".to_string()), file_url)?
+    );
+
+    // Make sure wrong file type requests are okay with unwrap_or_default
+    assert_eq!(
+      PictrsFileType::Jpg,
+      file_type(Some("jpeg".to_string()), file_url).unwrap_or_default()
+    );
+    assert_eq!(
+      PictrsFileType::Jpg,
+      file_type(Some("nonsense".to_string()), file_url).unwrap_or_default()
+    );
+
+    // Make sure missing file type requests are okay
+    assert_eq!(PictrsFileType::Jpg, file_type(None, file_url)?);
+
+    // jpeg
+    let file_url = "a8a7f07f-3ef2-40fa-849c-ae952f68f3ec.jpeg";
+
+    // Make sure jpeg one is okay
+    assert_eq!(
+      PictrsFileType::Jpg,
+      file_type(None, file_url).unwrap_or_default()
+    );
+
+    // Make sure proxy ones are okay
+    let proxy_url = "https://test.tld/pictrs/image/6d3b2f3f-7b29-4d9a-868e-b269423f4d6c.WEbP";
+    assert_eq!(PictrsFileType::Webp, file_type(None, proxy_url)?);
+
+    Ok(())
   }
 }
