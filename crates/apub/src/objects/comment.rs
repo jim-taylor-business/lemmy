@@ -18,13 +18,7 @@ use activitypub_federation::{
 use chrono::{DateTime, Utc};
 use lemmy_api_common::{
   context::LemmyContext,
-  utils::{
-    check_comment_depth,
-    get_url_blocklist,
-    is_mod_or_admin,
-    local_site_opt_to_slur_regex,
-    process_markdown,
-  },
+  utils::{get_url_blocklist, is_mod_or_admin, local_site_opt_to_slur_regex, process_markdown},
 };
 use lemmy_db_schema::{
   source::{
@@ -170,7 +164,8 @@ impl Object for ApubComment {
     ))
     .await?;
 
-    let (post, _) = Box::pin(note.get_parents(context)).await?;
+    let (post, _) = note.get_parents(context).await?;
+
     let creator = Box::pin(note.attributed_to.dereference(context)).await?;
     let is_mod_or_admin = is_mod_or_admin(&mut context.pool(), &creator, community.id)
       .await
@@ -188,10 +183,8 @@ impl Object for ApubComment {
   #[tracing::instrument(skip_all)]
   async fn from_json(note: Note, context: &Data<LemmyContext>) -> LemmyResult<ApubComment> {
     let creator = note.attributed_to.dereference(context).await?;
+    // Parent comment is already fetched in verify method, no risk of stack overflow here.
     let (post, parent_comment) = note.get_parents(context).await?;
-    if let Some(c) = &parent_comment {
-      check_comment_depth(c)?;
-    }
 
     let content = read_from_string_or_source(&note.content, &note.media_type, &note.source);
 
