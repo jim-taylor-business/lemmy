@@ -26,7 +26,8 @@ use lemmy_db_schema::{
   source::{
     activity::ActivitySendTargets,
     community::{Community, CommunityModerator, CommunityModeratorForm},
-    moderator::{ModAddCommunity, ModAddCommunityForm},
+    local_user::LocalUser,
+    moderator::{ModAddCommunity, ModAddCommunityForm, ModFeaturePost, ModFeaturePostForm},
     post::{Post, PostUpdateForm},
   },
   traits::{Crud, Joinable},
@@ -127,11 +128,26 @@ impl ActivityHandler for CollectionRemove {
       Community::get_by_collection_url(&mut context.pool(), &self.target.into())
         .await?
         .ok_or(LemmyErrorType::CouldntFindCommunity)?;
+    let actor = self.actor.dereference(context).await?;
+
     match collection_type {
       CollectionType::Moderators => {
         let remove_mod = ObjectId::<ApubPerson>::from(self.object)
           .dereference(context)
           .await?;
+
+        // If it's a local community, check if the actor is a higher mod than the removed mod.
+        // For remote communities we trust that the mod info is correct (because we may not have
+        // complete info to validate it).
+        if community.local {
+          LocalUser::is_higher_mod_or_admin_check(
+            &mut context.pool(),
+            community.id,
+            actor.id,
+            vec![remove_mod.id],
+          )
+          .await?;
+        }
 
         let form = CommunityModeratorForm {
           community_id: community.id,
@@ -155,11 +171,21 @@ impl ActivityHandler for CollectionRemove {
         let post = ObjectId::<ApubPost>::from(self.object)
           .dereference(context)
           .await?;
+        if post.community_id != community.id {
+          return Err(LemmyErrorType::InvalidCommunity.into());
+        }
         let form = PostUpdateForm {
           featured_community: Some(false),
           ..Default::default()
         };
         Post::update(&mut context.pool(), post.id, &form).await?;
+        let form = ModFeaturePostForm {
+          mod_person_id: actor.id,
+          post_id: post.id,
+          featured: false,
+          is_featured_community: true,
+        };
+        ModFeaturePost::create(&mut context.pool(), &form).await?;
       }
     }
     Ok(())
