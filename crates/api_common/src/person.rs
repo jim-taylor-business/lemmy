@@ -180,7 +180,7 @@ pub struct GetPersonDetails {
 }
 
 #[skip_serializing_none]
-#[derive(Debug, Serialize, Deserialize, Clone, PartialOrd, Ord)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "full", derive(TS))]
 #[cfg_attr(feature = "full", ts(export))]
 /// A person's details response.
